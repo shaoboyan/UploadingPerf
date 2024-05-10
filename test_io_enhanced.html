@@ -1,0 +1,1292 @@
+<html>
+<script>
+
+const parsedString = (function (names) {
+  const pairs = {};
+  for (let i = 0; i < names.length; ++i) {
+    const keyValue = names[i].split('=', 2);
+    if (keyValue.length === 1) pairs[keyValue[0]] = '';
+    else pairs[keyValue[0]] = decodeURIComponent(keyValue[1].replace(/\+/g, ' '));
+  }
+  return pairs;
+})(window.location.search.substr(1).split('&'));
+
+const hasJsArrayCases = true;
+const hasImageDataCases = true;
+const hasCanvasCases = true;
+
+const jsArrayUploadingCases = parsedString['UploadJsArrayCases'];
+if (jsArrayUploadingCases === 'none') {
+  hasJsArrayCases = false;
+}
+
+const imageDataUploadingCases = parsedString['UploadImageDataCases'];
+if (imageDataUploadingCases === 'none') {
+  hasImageDataCases = false;
+}
+
+const canvasUploadingCases = parsedString['UploadCanvasCases'];
+if (canvasUploadingCases === 'none') {
+  hasCanvasCases = false;
+}
+
+// All source canvases
+const glCanvas = document.createElement('CANVAS');
+
+// Choose 512 to align with WebGPU row pitch.
+const texWidth = 512,
+  texHeight = 512;
+
+glCanvas.width = texWidth;
+glCanvas.height = texHeight;
+
+const gpuCanvas = document.createElement('CANVAS');
+gpuCanvas.width = texWidth;
+gpuCanvas.height = texHeight;
+
+const canvas2d = document.createElement('CANVAS');
+canvas2d.width = texWidth;
+canvas2d.height = texHeight;
+
+// Upload data content;
+const data = new Uint8ClampedArray(texWidth * texHeight * 4)
+  .fill(0)
+  .map((_, i) => Math.floor(Math.random() * 512));
+
+const uploadTimes = 500;
+
+const vertShaderScript = `
+attribute vec2 a_position;
+attribute vec2 a_texcoord;
+
+uniform vec2 u_resolution;
+varying vec2 v_texcoord;
+
+void main()
+{
+    vec2 zeroToOne = a_position / u_resolution;
+    vec2 clipSpace = zeroToOne * 2.0 - 1.0;
+    gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
+    v_texcoord = a_texcoord;
+}`;
+
+const fragShaderScript = `
+precision mediump float;
+varying vec2 v_texcoord;
+uniform sampler2D u_texture;
+
+void main() {
+    gl_FragColor = texture2D(u_texture, v_texcoord);
+}
+`;
+
+function compileShader(gl, shaderSource, shaderType) {
+  const shader = gl.createShader(shaderType);
+  if (!shader) throw new Error(`[webgl] failed to create shader with type ${shaderType}.`);
+
+  gl.shaderSource(shader, shaderSource);
+  gl.compileShader(shader);
+  if (gl.getShaderParameter(shader, gl.COMPILE_STATUS) === false) {
+    throw new Error(`[webgl] failed to compile shader: ${gl.getShaderInfoLog(shader)}`);
+  }
+  return shader;
+}
+function setRectangle(gl, x, y, width, height) {
+  const x1 = x;
+  const x2 = x + width;
+  const y1 = y;
+  const y2 = y + height;
+  gl.bufferData(
+    gl.ARRAY_BUFFER,
+    new Float32Array([x1, y1, x2, y1, x1, y2, x1, y2, x2, y1, x2, y2]),
+    gl.STATIC_DRAW
+  );
+}
+
+function renderImage(gl, tex, texWidth, texHeight) {
+  gl.viewport(0, 0, texWidth, texHeight);
+  gl.scissor(0, 0, texWidth, texHeight);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+  const program = gl.createProgram();
+  // Attach pre-existing shaders
+  const vertShader = compileShader(gl, vertShaderScript, gl.VERTEX_SHADER);
+  const fragShader = compileShader(gl, fragShaderScript, gl.FRAGMENT_SHADER);
+  gl.attachShader(program, vertShader);
+  gl.attachShader(program, fragShader);
+  gl.linkProgram(program);
+  gl.useProgram(program);
+  const positionLocation = gl.getAttribLocation(program, 'a_position');
+  const texcoordLocation = gl.getAttribLocation(program, 'a_texcoord');
+  const resolutionLocation = gl.getUniformLocation(program, 'u_resolution');
+  const textureLocation = gl.getUniformLocation(program, 'u_texture');
+  const positionBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+  setRectangle(gl, 0, 0, texWidth, texHeight);
+
+  const texcoordBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
+  gl.bufferData(
+    gl.ARRAY_BUFFER,
+    new Float32Array([0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0]),
+    gl.STATIC_DRAW
+  );
+
+  gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+
+  gl.enableVertexAttribArray(positionLocation);
+  gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+  gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+  gl.enableVertexAttribArray(texcoordLocation);
+  gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
+  gl.vertexAttribPointer(texcoordLocation, 2, gl.FLOAT, false, 0, 0);
+
+  gl.uniform2f(resolutionLocation, gl.canvas.width, gl.canvas.height);
+  gl.uniform1i(textureLocation, 0);
+
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+  gl.viewport(0, 0, texWidth, texHeight);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  const pixels = new Uint8Array(gl.drawingBufferWidth * gl.drawingBufferHeight * 4);
+  gl.readPixels(
+    0,
+    0,
+    gl.drawingBufferWidth,
+    gl.drawingBufferHeight,
+    gl.RGBA,
+    gl.UNSIGNED_BYTE,
+    pixels
+  );
+
+  // Use gl.readPixels to ensure all work finished.
+}
+
+// render a random texture to canvas using webgl context
+function drawWebGLTexture() {
+  const gl = glCanvas.getContext('webgl2');
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, texWidth, texHeight, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  renderImage(gl, tex, texWidth, texHeight);
+}
+
+// fill webgl canvas content with 2d context
+function draw2dCanvas() {
+  const ctx = canvas2d.getContext('2d');
+  ctx.drawImage(glCanvas, 0, 0);
+
+  // Use getImageData to ensure 2d content ready.
+  ctx.getImageData(0, 0, canvas2d.width, canvas2d.height);
+}
+
+async function drawWebGPUCanvas() {
+  const adapter = await navigator.gpu?.requestAdapter();
+  const device = await adapter?.requestDevice();
+  if (!device) {
+    fail('need a browser that supports WebGPU');
+    return;
+  }
+
+  // Get a WebGPU context from the canvas and configure it
+  // const canvas = document.createElement('CANVAS');
+  const context = gpuCanvas.getContext('webgpu');
+  const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+  context.configure({
+    device,
+    format: presentationFormat,
+  });
+
+  const module = device.createShaderModule({
+    label: 'our hardcoded textured quad shaders',
+    code: `
+            struct OurVertexShaderOutput {
+                @builtin(position) position: vec4f,
+                @location(0) texcoord: vec2f,
+            };
+
+            @vertex fn vs(
+                @builtin(vertex_index) vertexIndex : u32
+            ) -> OurVertexShaderOutput {
+                const pos = array(
+                  vec2( 1.0,  1.0),
+                  vec2( 1.0, -1.0),
+                  vec2(-1.0, -1.0),
+                  vec2( 1.0,  1.0),
+                  vec2(-1.0, -1.0),
+                  vec2(-1.0,  1.0),
+                );
+
+                const uv = array(
+                  vec2(1.0, 0.0),
+                  vec2(1.0, 1.0),
+                  vec2(0.0, 1.0),
+                  vec2(1.0, 0.0),
+                  vec2(0.0, 1.0),
+                  vec2(0.0, 0.0),
+                );
+
+                var vsOutput: OurVertexShaderOutput;
+                vsOutput.position = vec4(pos[vertexIndex], 0.0, 1.0);
+                vsOutput.texcoord = uv[vertexIndex];
+                return vsOutput;
+            }
+
+            @group(0) @binding(0) var ourSampler: sampler;
+            @group(0) @binding(1) var ourTexture: texture_2d<f32>;
+
+            @fragment fn fs(fsInput: OurVertexShaderOutput) -> @location(0) vec4f {
+                return textureSample(ourTexture, ourSampler, fsInput.texcoord);
+            }
+            `,
+  });
+
+  const pipeline = device.createRenderPipeline({
+    label: 'hardcoded textured quad pipeline',
+    layout: 'auto',
+    vertex: {
+      module,
+      entryPoint: 'vs',
+    },
+    fragment: {
+      module,
+      entryPoint: 'fs',
+      targets: [{ format: presentationFormat }],
+    },
+  });
+
+  const texture = device.createTexture({
+    label: 'yellow F on red',
+    size: [texWidth, texHeight],
+    format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  device.queue.writeTexture(
+    { texture },
+    data,
+    { bytesPerRow: texWidth * 4 },
+    { width: texWidth, height: texHeight }
+  );
+
+  const sampler = device.createSampler();
+
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: sampler },
+      { binding: 1, resource: texture.createView() },
+    ],
+  });
+
+  const renderPassDescriptor = {
+    label: 'our basic canvas renderPass',
+    colorAttachments: [
+      {
+        // view: <- to be filled out when we render
+        clearValue: [0.3, 0.3, 0.3, 1],
+        loadOp: 'clear',
+        storeOp: 'store',
+      },
+    ],
+  };
+
+  function render() {
+    // Get the current texture from the canvas context and
+    // set it as the texture to render to.
+    renderPassDescriptor.colorAttachments[0].view = context.getCurrentTexture().createView();
+
+    const encoder = device.createCommandEncoder({
+      label: 'render quad encoder',
+    });
+    const pass = encoder.beginRenderPass(renderPassDescriptor);
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(6); // call our vertex shader 6 times
+    pass.end();
+
+    const commandBuffer = encoder.finish();
+    device.queue.submit([commandBuffer]);
+  }
+  render();
+  // Ensure all works finished.
+  await device.queue.onSubmittedWorkDone();
+}
+
+function callbackOnSync(
+  gl,
+  finished,
+  loadStart,
+  renderImage,
+  texture,
+  texWidth,
+  texHeight,
+  canvas,
+  runNext
+) {
+  const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+  gl.flush(); // make sure the sync command is read
+
+  setTimeout(checkSync);
+
+  function checkSync() {
+    const timeout = 0; // 0 = just check the status
+    const bitflags = 0;
+    const status = gl.clientWaitSync(sync, bitflags, timeout);
+    switch (status) {
+      case gl.TIMEOUT_EXPIRED:
+        // it's not done, check again next time
+        return setTimeout(checkSync);
+      case gl.WAIT_FAILED:
+        throw new Error('should never get here');
+      default:
+        // it's done!
+        gl.deleteSync(sync);
+
+        finished(loadStart);
+        renderImage(gl, texture, texWidth, texHeight);
+        document.body.appendChild(canvas);
+        if (runNext) {
+          runNext();
+        }
+    }
+  }
+}
+
+async function renderGPUTexture(device, gpuContext, texture) {
+  gpuContext.configure({
+    device,
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    usage: GPUTextureUsage.COPY_DST,
+  });
+  const commandEncoder = device.createCommandEncoder();
+  commandEncoder.copyTextureToTexture(
+    { texture },
+    { texture: gpuContext.getCurrentTexture() },
+    { width: texWidth, height: texHeight, depthOrArrayLayers: 1 }
+  );
+  device.queue.submit([commandEncoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+}
+
+async function readGPUTexture(device, texture, size) {
+  commandEncoder = device.createCommandEncoder();
+  const readBuffer = device.createBuffer({
+    size,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  commandEncoder.copyTextureToBuffer(
+    { texture },
+    { buffer: readBuffer, bytesPerRow: 2048 },
+    { width: 100, height: 100 }
+  );
+  device.queue.submit([commandEncoder.finish()]);
+  await readBuffer.mapAsync(GPUMapMode.READ);
+  const mappedBuffer = readBuffer.getMappedRange().slice(0);
+  console.log(new Int8Array(mappedBuffer.slice(0, 1000)));
+}
+
+async function initAllSourceCanvases() {
+  await drawWebGLTexture();
+  await drawWebGPUCanvas();
+
+  // 2d canvas draws webgl canvas.
+  // Ensure this draw after webgl draw finished.
+  await draw2dCanvas();
+}
+
+async function videoCopyEI2TToWebGPU(runNext) {
+  const video = document.getElementById('test');
+
+  const adapter = await navigator.gpu?.requestAdapter();
+  const device = await adapter?.requestDevice();
+  const gpuCanvasFrom2dToGpu = document.createElement('CANVAS');
+  gpuCanvasFrom2dToGpu.width = texWidth;
+  gpuCanvasFrom2dToGpu.height = texHeight;
+  const gpuContext = gpuCanvasFrom2dToGpu.getContext('webgpu');
+
+  const loadStart = performance.now();
+  const texture = device.createTexture({
+    size: [video.videoWidth, video.videoHeight],
+    dimension: '2d',
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    sampleCount: 1,
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+
+  for (let i = 0; i < uploadTimes; ++i) {
+    device.queue.copyExternalImageToTexture(
+      { source: video },
+      { texture },
+      {
+        width: video.videoWidth,
+        height: video.videoHeight,
+      }
+    );
+  }
+  await device.queue.onSubmittedWorkDone();
+  const time = performance.now() - loadStart;
+  console.log('\n');
+  console.log('load time from 2d to webgpu', uploadTimes, ' times', time, 'ms');
+  console.log('average load time from 2d to webgpu, ', time / uploadTimes, 'ms');
+  renderGPUTexture(device, gpuContext, texture);
+  const videoName = video.getAttribute('name');
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGPU Canvas: ' + videoName);
+  title.appendChild(text);
+  document.body.appendChild(title);
+  document.body.appendChild(gpuCanvasFrom2dToGpu);
+
+  if (runNext) {
+    runNext();
+  }
+}
+
+async function loadFrom2dCanvasToWebGPU(runNext) {
+  const adapter = await navigator.gpu?.requestAdapter();
+  const device = await adapter?.requestDevice();
+  const gpuCanvasFrom2dToGpu = document.createElement('CANVAS');
+  gpuCanvasFrom2dToGpu.width = texWidth;
+  gpuCanvasFrom2dToGpu.height = texHeight;
+  const gpuContext = gpuCanvasFrom2dToGpu.getContext('webgpu');
+
+  const loadStart = performance.now();
+  const texture = device.createTexture({
+    size: [texWidth, texHeight],
+    dimension: '2d',
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    sampleCount: 1,
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+
+  for (let i = 0; i < uploadTimes; ++i) {
+    device.queue.copyExternalImageToTexture(
+      { source: canvas2d },
+      { texture },
+      {
+        width: texWidth,
+        height: texHeight,
+      }
+    );
+  }
+  await device.queue.onSubmittedWorkDone();
+  const time = performance.now() - loadStart;
+  console.log('\n');
+  console.log('load time from 2d to webgpu', uploadTimes, ' times', time, 'ms');
+  console.log('average load time from 2d to webgpu, ', time / uploadTimes, 'ms');
+  renderGPUTexture(device, gpuContext, texture);
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGPU Canvas:Load-From-2D-Canvas');
+  title.appendChild(text);
+  document.body.appendChild(title);
+  document.body.appendChild(gpuCanvasFrom2dToGpu);
+
+  if (runNext) {
+    runNext();
+  }
+}
+
+async function loadFromWebGLCanvasToWebGPU(runNext) {
+  const adapter = await navigator.gpu?.requestAdapter();
+  const device = await adapter?.requestDevice();
+  const gpuCanvasFromGLToGpu = document.createElement('CANVAS');
+  gpuCanvasFromGLToGpu.width = texWidth;
+  gpuCanvasFromGLToGpu.height = texHeight;
+  const gpuContext = gpuCanvasFromGLToGpu.getContext('webgpu');
+
+  const loadStart = performance.now();
+  const texture = device.createTexture({
+    size: [texWidth, texHeight],
+    dimension: '2d',
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    sampleCount: 1,
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+
+  for (let i = 0; i < uploadTimes; ++i) {
+    device.queue.copyExternalImageToTexture(
+      { source: glCanvas },
+      { texture },
+      {
+        width: texWidth,
+        height: texHeight,
+      }
+    );
+  }
+  await device.queue.onSubmittedWorkDone();
+  const time = performance.now() - loadStart;
+  console.log('\n');
+  console.log('load time from webgl to webgpu', uploadTimes, ' times', time, 'ms');
+  console.log('average load time from webgl to webgpu, ', time / uploadTimes, 'ms');
+  renderGPUTexture(device, gpuContext, texture);
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGPU Canvas:Load-From-GL-Canvas');
+  title.appendChild(text);
+  document.body.appendChild(title);
+  document.body.appendChild(gpuCanvasFromGLToGpu);
+
+  if (runNext) {
+    runNext();
+  }
+}
+
+async function loadFromWebGPUCanvasToWebGPU(runNext) {
+  const adapter = await navigator.gpu?.requestAdapter();
+  const device = await adapter?.requestDevice();
+  const gpuCanvasFromGpuToGpu = document.createElement('CANVAS');
+  gpuCanvasFromGpuToGpu.width = texWidth;
+  gpuCanvasFromGpuToGpu.height = texHeight;
+  const gpuContext = gpuCanvasFromGpuToGpu.getContext('webgpu');
+
+  const loadStart = performance.now();
+  const texture = device.createTexture({
+    size: [texWidth, texHeight],
+    dimension: '2d',
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    sampleCount: 1,
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+
+  for (let i = 0; i < uploadTimes; ++i) {
+    device.queue.copyExternalImageToTexture(
+      { source: glCanvas },
+      { texture },
+      {
+        width: texWidth,
+        height: texHeight,
+      }
+    );
+  }
+  await device.queue.onSubmittedWorkDone();
+  const time = performance.now() - loadStart;
+  console.log('\n');
+  console.log('load time from webgpu to webgpu', uploadTimes, ' times', time, 'ms');
+  console.log('average load time from webgpu to webgpu, ', time / uploadTimes, 'ms');
+  renderGPUTexture(device, gpuContext, texture);
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGPU Canvas:Load-From-GPU-Canvas');
+  title.appendChild(text);
+  document.body.appendChild(title);
+  document.body.appendChild(gpuCanvasFromGpuToGpu);
+
+  if (runNext) {
+    runNext();
+  }
+}
+
+async function loadFrom2dCanvasToWebGLViaTexImage2D(runNext) {
+  const glCanvasFrom2dViaTexImage2D = document.createElement('canvas');
+  glCanvasFrom2dViaTexImage2D.width = texWidth;
+  glCanvasFrom2dViaTexImage2D.height = texHeight;
+  const gl = glCanvasFrom2dViaTexImage2D.getContext('webgl2');
+  const tex = gl.createTexture();
+  const loadStart = performance.now();
+  for (let i = 0; i < uploadTimes; ++i) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      texWidth,
+      texHeight,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      canvas2d
+    );
+  }
+
+  function finished(loadStart) {
+    const time = performance.now() - loadStart;
+    console.log('\n');
+    console.log('load time from 2d to gl via texImage2D', uploadTimes, ' times: ', time, 'ms');
+    console.log('average load time from 2d to gl via texImage2D: ', time / uploadTimes, 'ms');
+  }
+
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGL Canvas:Load-From-2D-Canvas-Via-TexImage2D');
+  title.appendChild(text);
+  document.body.appendChild(title);
+  callbackOnSync(
+    gl,
+    finished,
+    loadStart,
+    renderImage,
+    tex,
+    texWidth,
+    texHeight,
+    glCanvasFrom2dViaTexImage2D,
+    runNext
+  );
+}
+
+async function loadFromWebGLCanvasToWebGLViaTexImage2D(runNext) {
+  const glCanvasFromGlViaTexImage2D = document.createElement('canvas');
+  glCanvasFromGlViaTexImage2D.width = texWidth;
+  glCanvasFromGlViaTexImage2D.height = texHeight;
+  const gl = glCanvasFromGlViaTexImage2D.getContext('webgl2');
+  const tex = gl.createTexture();
+  const loadStart = performance.now();
+  for (let i = 0; i < uploadTimes; ++i) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      texWidth,
+      texHeight,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      glCanvas
+    );
+  }
+
+  function finished(loadStart) {
+    const time = performance.now() - loadStart;
+    console.log('\n');
+    console.log('load time from gl to gl via texImage2D', uploadTimes, ' times: ', time, 'ms');
+    console.log('average load time from gl to gl via texImage2D: ', time / uploadTimes, 'ms');
+  }
+
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGL Canvas:Load-From-GL-Canvas-Via-TexImage2D');
+  title.appendChild(text);
+  document.body.appendChild(title);
+  callbackOnSync(
+    gl,
+    finished,
+    loadStart,
+    renderImage,
+    tex,
+    texWidth,
+    texHeight,
+    glCanvasFromGlViaTexImage2D,
+    runNext
+  );
+}
+
+async function loadFromWebGPUCanvasToWebGLViaTexImage2D(runNext) {
+  const glCanvasFromGpuViaTexImage2D = document.createElement('CANVAS');
+  glCanvasFromGpuViaTexImage2D.width = texWidth;
+  glCanvasFromGpuViaTexImage2D.height = texHeight;
+  const gl = glCanvasFromGpuViaTexImage2D.getContext('webgl2');
+
+  const loadStart = performance.now();
+  const tex = gl.createTexture();
+  for (let i = 0; i < uploadTimes; ++i) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      texWidth,
+      texHeight,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      gpuCanvas
+    );
+  }
+
+  function finished(loadStart) {
+    const time = performance.now() - loadStart;
+    console.log('\n');
+    console.log('load time from gpu to gl via texImage2D', uploadTimes, ' times: ', time, 'ms');
+    console.log('average load time from gpu to gl via texImage2D: ', time / uploadTimes, 'ms');
+  }
+
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGL Canvas:Load-From-GPU-Canvas-Via-TexImage2D');
+  title.appendChild(text);
+  document.body.appendChild(title);
+  callbackOnSync(
+    gl,
+    finished,
+    loadStart,
+    renderImage,
+    tex,
+    texWidth,
+    texHeight,
+    glCanvasFromGpuViaTexImage2D,
+    runNext
+  );
+}
+
+async function loadFrom2dCanvasToWebGLViaTexStorage2D(runNext) {
+  const glCanvasFrom2dViaStorage2D = document.createElement('canvas');
+  glCanvasFrom2dViaStorage2D.width = texWidth;
+  glCanvasFrom2dViaStorage2D.height = texHeight;
+  const gl = glCanvasFrom2dViaStorage2D.getContext('webgl2');
+
+  const loadStart = performance.now();
+  // Initialize webgl texture
+  const texture = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+
+  // Use texture storage to allocate texture memory
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, texWidth, texHeight);
+
+  // Uplaod to texture
+  for (let i = 0; i < uploadTimes; ++i) {
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texSubImage2D(
+      gl.TEXTURE_2D,
+      0,
+      0,
+      0,
+      texWidth,
+      texHeight,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      canvas2d
+    );
+  }
+
+  function finished(loadStart) {
+    const time = performance.now() - loadStart;
+    console.log('\n');
+    console.log('load time from 2d to gl', uploadTimes, ' times via texStorage2D: ', time, 'ms');
+    console.log('average load time from 2d to gl via texStorage2D: ', time / uploadTimes, 'ms');
+  }
+
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGL Canvas:Load-From-2D-Canvas-Via-TexStorage2D');
+  title.appendChild(text);
+  document.body.appendChild(title);
+
+  callbackOnSync(
+    gl,
+    finished,
+    loadStart,
+    renderImage,
+    texture,
+    texWidth,
+    texHeight,
+    glCanvasFrom2dViaStorage2D,
+    runNext
+  );
+}
+
+async function loadFromWebGLCanvasToWebGLViaTexStorage2D(runNext) {
+  const glCanvasFromGlViaTexStorage2D = document.createElement('CANVAS');
+  glCanvasFromGlViaTexStorage2D.width = texWidth;
+  glCanvasFromGlViaTexStorage2D.height = texHeight;
+  const gl = glCanvasFromGlViaTexStorage2D.getContext('webgl2');
+
+  const loadStart = performance.now();
+
+  const texture = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+
+  // Use texture storage to allocate texture memory
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, texWidth, texHeight);
+
+  // Uplaod to texture
+  for (let i = 0; i < uploadTimes; ++i) {
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texSubImage2D(
+      gl.TEXTURE_2D,
+      0,
+      0,
+      0,
+      texWidth,
+      texHeight,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      glCanvas
+    );
+  }
+
+  function finished(loadStart) {
+    const time = performance.now() - loadStart;
+    console.log('\n');
+    console.log('load time from gl to gl via texStorage2D', uploadTimes, 'times: ', time, 'ms');
+    console.log('average load time from gl to gl via texStorage2D: ', time / uploadTimes, 'ms');
+  }
+
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGL Canvas:Load-From-GL-Canvas-Via-TexStorage2D');
+  title.appendChild(text);
+  document.body.appendChild(title);
+
+  callbackOnSync(
+    gl,
+    finished,
+    loadStart,
+    renderImage,
+    texture,
+    texWidth,
+    texHeight,
+    glCanvasFromGlViaTexStorage2D,
+    runNext
+  );
+}
+
+async function loadFromWebGPUCanvasToWebGLViaTexStorage2D(runNext) {
+  const glCanvasFromGpuViaTexStorage2D = document.createElement('CANVAS');
+  glCanvasFromGpuViaTexStorage2D.width = texWidth;
+  glCanvasFromGpuViaTexStorage2D.height = texHeight;
+  const gl = glCanvasFromGpuViaTexStorage2D.getContext('webgl2');
+
+  const loadStart = performance.now();
+
+  const texture = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+
+  // Use texture storage to allocate texture memory
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, texWidth, texHeight);
+
+  // Uplaod to texture
+  for (let i = 0; i < uploadTimes; ++i) {
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texSubImage2D(
+      gl.TEXTURE_2D,
+      0,
+      0,
+      0,
+      texWidth,
+      texHeight,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      gpuCanvas
+    );
+  }
+
+  function finished(loadStart) {
+    const time = performance.now() - loadStart;
+    console.log('\n');
+    console.log('load time from gpu to gl via texStorage2D', uploadTimes, 'times: ', time, 'ms');
+    console.log('average load time from gpu to gl via texStorage2D: ', time / uploadTimes, 'ms');
+  }
+
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGL Canvas:Load-From-GPU-Canvas-Via-TexStorage2D');
+  title.appendChild(text);
+  document.body.appendChild(title);
+
+  callbackOnSync(
+    gl,
+    finished,
+    loadStart,
+    renderImage,
+    texture,
+    texWidth,
+    texHeight,
+    glCanvasFromGpuViaTexStorage2D,
+    runNext
+  );
+}
+
+async function loadFromJsArrayToWebGPUThroughMapAsync(runNext) {
+  const adapter = await navigator.gpu?.requestAdapter();
+  const device = await adapter?.requestDevice();
+  const gpuCanvasFromCPUThroughMapAsync = document.createElement('CANVAS');
+  gpuCanvasFromCPUThroughMapAsync.width = texWidth;
+  gpuCanvasFromCPUThroughMapAsync.height = texHeight;
+  const gpuContext = gpuCanvasFromCPUThroughMapAsync.getContext('webgpu');
+
+  const texture = device.createTexture({
+    size: [texWidth, texHeight],
+    dimension: '2d',
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    sampleCount: 1,
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+
+  const loadStart = performance.now();
+  const stagingBuffer = device.createBuffer({
+    size: texWidth * texHeight * 4,
+    usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
+  });
+
+  for (let i = 0; i < uploadTimes; ++i) {
+    await stagingBuffer.mapAsync(GPUMapMode.WRITE);
+    new Uint8ClampedArray(stagingBuffer.getMappedRange()).set(data);
+    stagingBuffer.unmap();
+
+    const commandEncoder = device.createCommandEncoder();
+    commandEncoder.copyBufferToTexture(
+      { buffer: stagingBuffer, bytesPerRow: texWidth * 4, rowsPerImage: texHeight },
+      { texture },
+      { width: texWidth, height: texHeight, depthOrArrayLayers: 1 }
+    );
+    device.queue.submit([commandEncoder.finish()]);
+  }
+
+  await device.queue.onSubmittedWorkDone();
+  const time = performance.now() - loadStart;
+  console.log('\n');
+  console.log('load time from CPU to webgpu through MapAsync', uploadTimes, ' times', time, 'ms');
+  console.log('average load time from CPU to webgpu through MapAsync, ', time / uploadTimes, 'ms');
+  renderGPUTexture(device, gpuContext, texture);
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGPU Canvas:Load-From-CPU-Through-MapAsync');
+  title.appendChild(text);
+  document.body.appendChild(title);
+  document.body.appendChild(gpuCanvasFromCPUThroughMapAsync);
+
+  if (runNext) {
+    runNext();
+  }
+}
+
+async function loadFromJsArrayToWebGPUThroughWriteTexture(runNext) {
+  const adapter = await navigator.gpu?.requestAdapter();
+  const device = await adapter?.requestDevice();
+  const gpuCanvasFromCPUThroughWriteTexture = document.createElement('CANVAS');
+  gpuCanvasFromCPUThroughWriteTexture.width = texWidth;
+  gpuCanvasFromCPUThroughWriteTexture.height = texHeight;
+  const gpuContext = gpuCanvasFromCPUThroughWriteTexture.getContext('webgpu');
+
+  const texture = device.createTexture({
+    size: [texWidth, texHeight],
+    dimension: '2d',
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    sampleCount: 1,
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+
+  const loadStart = performance.now();
+  for (let i = 0; i < uploadTimes; ++i) {
+    device.queue.writeTexture(
+      { texture },
+      data,
+      { bytesPerRow: texWidth * 4 },
+      { width: texWidth, height: texHeight }
+    );
+  }
+
+  await device.queue.onSubmittedWorkDone();
+  const time = performance.now() - loadStart;
+  console.log('\n');
+  console.log(
+    'load time from CPU to webgpu through WriteTexture',
+    uploadTimes,
+    ' times',
+    time,
+    'ms'
+  );
+  console.log(
+    'average load time from CPU to webgpu through WriteTexture, ',
+    time / uploadTimes,
+    'ms'
+  );
+  renderGPUTexture(device, gpuContext, texture);
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGPU Canvas:Load-From-CPU-Through-WriteTexture');
+  title.appendChild(text);
+  document.body.appendChild(title);
+  document.body.appendChild(gpuCanvasFromCPUThroughWriteTexture);
+
+  if (runNext) {
+    runNext();
+  }
+}
+
+async function loadFromJsArrayToWebGL(runNext) {
+  const glCanvasFromCPUViaTexImage2D = document.createElement('CANVAS');
+  glCanvasFromCPUViaTexImage2D.width = texWidth;
+  glCanvasFromCPUViaTexImage2D.height = texHeight;
+  const gl = glCanvasFromCPUViaTexImage2D.getContext('webgl2');
+
+  const loadStart = performance.now();
+  const tex = gl.createTexture();
+  for (let i = 0; i < uploadTimes; ++i) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      texWidth,
+      texHeight,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      data
+    );
+  }
+
+  function finished(loadStart) {
+    const time = performance.now() - loadStart;
+    console.log('\n');
+    console.log('load time from CPU to gl via texImage2D', uploadTimes, ' times: ', time, 'ms');
+    console.log('average load time from CPU to gl via texImage2D: ', time / uploadTimes, 'ms');
+  }
+
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGL Canvas:Load-From-CPU-Via-TexImage2D');
+  title.appendChild(text);
+  document.body.appendChild(title);
+  callbackOnSync(
+    gl,
+    finished,
+    loadStart,
+    renderImage,
+    tex,
+    texWidth,
+    texHeight,
+    glCanvasFromCPUViaTexImage2D,
+    runNext
+  );
+}
+
+async function loadFromImageDataToWebGPUThroughCopyEI2T(runNext) {
+  const adapter = await navigator.gpu?.requestAdapter();
+  const device = await adapter?.requestDevice();
+  const gpuCanvasFromCPUThroughCopyEI2T = document.createElement('CANVAS');
+  gpuCanvasFromCPUThroughCopyEI2T.width = texWidth;
+  gpuCanvasFromCPUThroughCopyEI2T.height = texHeight;
+  const gpuContext = gpuCanvasFromCPUThroughCopyEI2T.getContext('webgpu');
+  const imageData = new ImageData(data, texWidth, texHeight);
+
+  const texture = device.createTexture({
+    size: [texWidth, texHeight],
+    dimension: '2d',
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    sampleCount: 1,
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  const loadStart = performance.now();
+  for (let i = 0; i < uploadTimes; ++i) {
+    device.queue.copyExternalImageToTexture(
+      { source: imageData },
+      { texture },
+      {
+        width: texWidth,
+        height: texHeight,
+      }
+    );
+  }
+  await device.queue.onSubmittedWorkDone();
+  const time = performance.now() - loadStart;
+  console.log('\n');
+  console.log(
+    'load time from CPU ImageData to webgpu through CopyEI2T',
+    uploadTimes,
+    ' times',
+    time,
+    'ms'
+  );
+  console.log('average load time from CPU ImageData to webgpu, ', time / uploadTimes, 'ms');
+  renderGPUTexture(device, gpuContext, texture);
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGPU Canvas:Load-From-CPU-ImageData-Through-CopyEI2T');
+  title.appendChild(text);
+  document.body.appendChild(title);
+  document.body.appendChild(gpuCanvasFromCPUThroughCopyEI2T);
+
+  if (runNext) {
+    runNext();
+  }
+}
+
+async function loadFromImageDataToWebGL(runNext) {
+  const glCanvasFromCPUImageDataViaTexImage2D = document.createElement('CANVAS');
+  glCanvasFromCPUImageDataViaTexImage2D.width = texWidth;
+  glCanvasFromCPUImageDataViaTexImage2D.height = texHeight;
+  const gl = glCanvasFromCPUImageDataViaTexImage2D.getContext('webgl2');
+  const imageData = new ImageData(data, texWidth, texHeight);
+
+  const loadStart = performance.now();
+  const tex = gl.createTexture();
+  for (let i = 0; i < uploadTimes; ++i) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      texWidth,
+      texHeight,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      imageData
+    );
+  }
+
+  function finished(loadStart) {
+    const time = performance.now() - loadStart;
+    console.log('\n');
+    console.log(
+      'load time from CPU ImageData to gl via texImage2D',
+      uploadTimes,
+      ' times: ',
+      time,
+      'ms'
+    );
+    console.log(
+      'average load time from CPU ImageData to gl via texImage2D: ',
+      time / uploadTimes,
+      'ms'
+    );
+  }
+
+  const title = document.createElement('P');
+  const text = document.createTextNode('WebGL Canvas:Load-From-CPU-ImageData-Via-TexImage2D');
+  title.appendChild(text);
+  document.body.appendChild(title);
+  callbackOnSync(
+    gl,
+    finished,
+    loadStart,
+    renderImage,
+    tex,
+    texWidth,
+    texHeight,
+    glCanvasFromCPUImageDataViaTexImage2D,
+    runNext
+  );
+}
+
+async function loadFromJsArrayToWebGPUThroughMapAsyncAndResourcePool(runNext) {
+  const adapter = await navigator.gpu?.requestAdapter();
+  const device = await adapter?.requestDevice();
+  const gpuCanvasFromCPUThroughMapAsyncAndResourcePool = document.createElement('CANVAS');
+  gpuCanvasFromCPUThroughMapAsyncAndResourcePool.width = texWidth;
+  gpuCanvasFromCPUThroughMapAsyncAndResourcePool.height = texHeight;
+  const gpuContext = gpuCanvasFromCPUThroughMapAsyncAndResourcePool.getContext('webgpu');
+
+  const texture = device.createTexture({
+    size: [texWidth, texHeight],
+    dimension: '2d',
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    sampleCount: 1,
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+
+  const bufferPool = [];
+
+  const loadStart = performance.now();
+  const stagingBuffer = device.createBuffer({
+    size: texWidth * texHeight * 4,
+    usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
+  });
+
+  for (let i = 0; i < uploadTimes; ++i) {
+    if (bufferPool.length == 0) {
+      const buffer = device.createBuffer({
+        size: texWidth * texHeight * 4,
+        usage: GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC,
+        mappedAtCreation: true,
+      });
+      bufferPool.push(buffer);
+    }
+
+    const stagingBuffer = bufferPool.pop();
+    new Uint8ClampedArray(stagingBuffer.getMappedRange()).set(data);
+    stagingBuffer.unmap();
+
+    const commandEncoder = device.createCommandEncoder();
+    commandEncoder.copyBufferToTexture(
+      { buffer: stagingBuffer, bytesPerRow: texWidth * 4, rowsPerImage: texHeight },
+      { texture },
+      { width: texWidth, height: texHeight, depthOrArrayLayers: 1 }
+    );
+    device.queue.submit([commandEncoder.finish()]);
+    stagingBuffer.mapAsync(GPUMapMode.WRITE).then(() => bufferPool.push(stagingBuffer));
+  }
+
+  await device.queue.onSubmittedWorkDone();
+  const time = performance.now() - loadStart;
+  console.log('\n');
+  console.log(
+    'load time from CPU to webgpu through MapAsync with buffer pool',
+    uploadTimes,
+    ' times',
+    time,
+    'ms'
+  );
+  console.log(
+    'average load time from CPU to webgpu through MapAsync with buffer pool, ',
+    time / uploadTimes,
+    'ms'
+  );
+  renderGPUTexture(device, gpuContext, texture);
+  const title = document.createElement('P');
+  const text = document.createTextNode(
+    'WebGPU Canvas:Load-From-CPU-Through-MapAsync-With-Buffer-Pool'
+  );
+  title.appendChild(text);
+  document.body.appendChild(title);
+  document.body.appendChild(gpuCanvasFromCPUThroughMapAsyncAndResourcePool);
+
+  if (runNext) {
+    runNext();
+  }
+}
+
+const uploadingSamples = [];
+
+const JsArrayUploadingCases = [
+  loadFromJsArrayToWebGPUThroughMapAsync,
+  loadFromJsArrayToWebGPUThroughWriteTexture,
+  loadFromJsArrayToWebGPUThroughMapAsyncAndResourcePool,
+];
+
+const ImageDataUploadingCases = [
+  loadFromImageDataToWebGPUThroughCopyEI2T,
+  loadFromImageDataToWebGL,
+];
+
+const CanvasUploadingCases = [
+  loadFromWebGPUCanvasToWebGLViaTexStorage2D,
+  loadFromWebGLCanvasToWebGLViaTexStorage2D,
+  loadFrom2dCanvasToWebGLViaTexStorage2D,
+  loadFromWebGPUCanvasToWebGLViaTexImage2D,
+  loadFromWebGLCanvasToWebGLViaTexImage2D,
+  loadFrom2dCanvasToWebGLViaTexImage2D,
+  loadFromWebGPUCanvasToWebGPU,
+  loadFromWebGLCanvasToWebGPU,
+  loadFrom2dCanvasToWebGPU,
+];
+
+let allUploadingSamples = [];
+
+if (hasJsArrayCases) {
+  allUploadingSamples = allUploadingSamples.concat(JsArrayUploadingCases);
+}
+
+if (hasImageDataCases) {
+  allUploadingSamples = allUploadingSamples.concat(ImageDataUploadingCases);
+}
+
+if (hasCanvasCases) {
+  allUploadingSamples = allUploadingSamples.concat(CanvasUploadingCases);
+}
+
+async function runAllSamples() {
+  function runNext() {
+    const func = allUploadingSamples.pop();
+    if (func) {
+      func(runNext);
+    }
+  }
+  runNext();
+}
+
+async function main() {
+  await initAllSourceCanvases();
+  await runAllSamples();
+}
+main();
+
+</script>
+</html>
